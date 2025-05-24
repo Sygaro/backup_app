@@ -17,7 +17,7 @@ cp backup_app/backup.sh .
 Opprett token:
 https://www.dropbox.com/developers/apps
 ```
-cp backup_app/env_mal .env
+cp backup_app/env_mal backup_app/.env
 nano backup_app/.env
 ```
 ### Start backup
