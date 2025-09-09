@@ -35,6 +35,8 @@ deactivate
 
 ## Bruk
 
+> Merk: Kortflagg – `-v` = verbose (mer logging), `-V` = version (f.eks. `-V 1.10`).
+
 **Standard ZIP-backup uten versjon (dato i navn):**
 
 ```bash
