@@ -12,20 +12,18 @@ Fleksibel backup-CLI for prosjekter på RPi/Unix.
 import argparse
 import os
 import sys
-import time
 import shutil
 import fnmatch
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Optional, Set
+from typing import Iterable, List, Optional
 
 try:
     from dotenv import load_dotenv  # type: ignore
 except Exception:
     load_dotenv = None
 
-# Dropbox-opplasting er valgfri; importeres kun ved behov
 def _lazy_import_dropbox():
     import uploader_dropbox  # noqa: F401
     return uploader_dropbox
@@ -66,21 +64,12 @@ def iter_files(src: Path,
                include_hidden: bool) -> Iterable[Path]:
     for p in src.rglob("*"):
         if p.is_dir():
-            # skjulte mapper?
-            if not include_hidden and p.name.startswith("."):
-                # hopp over hele treet
-                # Path.rglob vil likevel gå inn, så vi håndterer på filnivå
-                pass
             continue
         rel = p.relative_to(src).as_posix()
-
-        # hopp over skjulte filer med mindre eksplisitt tillatt
         if not include_hidden and any(part.startswith(".") for part in p.parts):
             continue
-
         if matched_any(rel, exclude_patterns):
             continue
-
         yield p
 
 def make_archive(src: Path,
@@ -121,8 +110,7 @@ def make_archive(src: Path,
                 zf.write(f, arcname)
     else:
         import tarfile
-        mode = "w:gz"
-        with tarfile.open(out, mode) as tf:
+        with tarfile.open(out, "w:gz") as tf:
             for f in iter_files(src, exclude_patterns, include_hidden):
                 arcname = f.relative_to(src).as_posix()
                 tf.add(f, arcname)
@@ -130,7 +118,6 @@ def make_archive(src: Path,
     return out
 
 def verify_archive(archive_path: Path) -> None:
-    """Enkel verifisering: åpne og list innhold."""
     if archive_path.suffix == ".zip":
         import zipfile
         with zipfile.ZipFile(archive_path, "r") as zf:
@@ -145,7 +132,6 @@ def verify_archive(archive_path: Path) -> None:
 def apply_retention(dest_dir: Path, project: str, keep: int) -> None:
     if keep <= 0:
         return
-    # Finn alle arkiver som starter med 'project_'
     candidates: List[Path] = sorted(
         [p for p in dest_dir.glob(f"{project}_*") if p.is_file()],
         key=lambda p: p.stat().st_mtime,
@@ -198,7 +184,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[List[str]] = None) -> int:
     if load_dotenv:
-        load_dotenv()  # last inn .env hvis finnes
+        load_dotenv()
     args = parse_args(argv)
     setup_logging(args.verbose)
 
@@ -210,12 +196,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     dest_dir = Path(args.dest).expanduser().resolve()
     project = args.project or src.name
 
-    # Håndter versjon/no-version
     version = args.version
     if args.no_version:
         version = None
 
-    # Slå sammen ekskludering fra .backupignore + --exclude
     exclude_patterns: List[str] = read_ignore_file(src)
     exclude_patterns.extend(args.exclude or [])
 
@@ -249,11 +233,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             verify_archive(archive_path)
         create_latest_symlink(dest_dir, archive_path, project)
 
-    # Retention
     if args.keep and not args.dry_run:
         apply_retention(dest_dir, project, args.keep)
 
-    # Dropbox
     if args.dropbox_path:
         token = os.getenv("DROPBOX_TOKEN")
         if not token:

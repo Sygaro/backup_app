@@ -1,29 +1,28 @@
-# Fil: dropbox_opplasting.py
-# Formål: Laster opp en fil til Dropbox ved hjelp av en token lagret i .env
-
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Kompatibilitets-wrapper for historisk bruk. Videresender til uploader_dropbox.
+"""
+from pathlib import Path
 import os
-import dropbox
-from dotenv import load_dotenv
+import sys
+from typing import Literal
 
-# Last inn DROPBOX_TOKEN fra .env
-load_dotenv()
-TOKEN = os.getenv("DROPBOX_TOKEN")
+try:
+    from uploader_dropbox import upload_to_dropbox
+except Exception:
+    print("Mangler 'uploader_dropbox'. Installer requirements og prøv igjen.", file=sys.stderr)
+    raise
 
-if not TOKEN:
-    raise ValueError("❌ DROPBOX_TOKEN mangler i .env-filen.")
+def main(local_path: str, dest_path: str, mode: Literal["add","overwrite"]="add") -> None:
+    token = os.getenv("DROPBOX_TOKEN")
+    if not token:
+        raise SystemExit("DROPBOX_TOKEN mangler (sett i miljø eller .env).")
+    upload_to_dropbox(Path(local_path), dest_path, token=token, mode=mode)
 
-def last_opp_til_dropbox(filsti, dropbox_sti=None):
-    """Laster opp filen til Dropbox"""
-    if not os.path.isfile(filsti):
-        raise FileNotFoundError(f"Filen finnes ikke: {filsti}")
-    
-    dbx = dropbox.Dropbox(TOKEN)
-    filnavn = os.path.basename(filsti)
-    dropbox_mål = dropbox_sti if dropbox_sti else f"/{filnavn}"
-
-    with open(filsti, "rb") as f:
-        try:
-            dbx.files_upload(f.read(), dropbox_mål, mode=dropbox.files.WriteMode.overwrite)
-            print(f"☁️ Opplastet til Dropbox: {dropbox_mål}")
-        except Exception as e:
-            print(f"❌ Feil under opplasting til Dropbox: {e}")
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        print("Bruk: dropbox_opplasting.py /lokal/fil.zip /Dropbox/destinasjon/fil.zip [add|overwrite]", file=sys.stderr)
+        raise SystemExit(2)
+    mode = sys.argv[3] if len(sys.argv) >= 4 else "add"
+    main(sys.argv[1], sys.argv[2], mode=mode)  # type: ignore[arg-type]
