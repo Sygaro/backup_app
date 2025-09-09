@@ -1,3 +1,4 @@
+# === uploader_dropbox.py (NY) ===
 # -*- coding: utf-8 -*-
 from pathlib import Path
 from typing import Literal
@@ -5,13 +6,12 @@ from typing import Literal
 import dropbox
 from dropbox.files import WriteMode
 
-# Enkelt API med automatisk chunked upload for store filer
 def upload_to_dropbox(
     local_path: Path,
     dest_path: str,
     token: str,
     mode: Literal["add", "overwrite"] = "add",
-    chunk_size: int = 8 * 1024 * 1024,  # 8 MB
+    chunk_size: int = 8 * 1024 * 1024,
 ) -> None:
     assert local_path.is_file(), f"Finner ikke fil: {local_path}"
     dbx = dropbox.Dropbox(token)
@@ -23,12 +23,8 @@ def upload_to_dropbox(
             dbx.files_upload(f.read(), dest_path, mode=write_mode, mute=True)
             return
 
-        # Chunked
-        session_start = dbx.files_upload_session_start(f.read(chunk_size))
-        cursor = dropbox.files.UploadSessionCursor(
-            session_id=session_start.session_id,
-            offset=f.tell(),
-        )
+        start = dbx.files_upload_session_start(f.read(chunk_size))
+        cursor = dropbox.files.UploadSessionCursor(session_id=start.session_id, offset=f.tell())
         commit = dropbox.files.CommitInfo(path=dest_path, mode=write_mode, mute=True)
 
         while f.tell() < file_size:

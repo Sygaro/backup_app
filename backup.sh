@@ -1,17 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Bruk: ./backup.sh [-p PROSJEKT] [-s KILDE] [-d DEST] [-v VERSJON] [-t TAG] [--no-version] [--dropbox-path /sti]
-# Eksempel (samme semantikk som README viser i dag):
-#   ./backup.sh -s /home/reidar/garage -p garasjeport -v 1.06 -t Frontend_OK --dropbox-path "/backup/garasjeport"
+# Finn virkelig skriptplassering selv om dette scriptet er en symlink.
+resolve_script_dir() {
+  local SOURCE="${BASH_SOURCE[0]}"
+  while [ -L "$SOURCE" ]; do
+    local TARGET
+    TARGET="$(readlink "$SOURCE")"
+    if [[ "$TARGET" == /* ]]; then
+      SOURCE="$TARGET"
+    else
+      local DIR
+      DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+      SOURCE="$DIR/$TARGET"
+    fi
+  done
+  cd -P "$(dirname "$SOURCE")" && pwd
+}
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VENV="$SCRIPT_DIR/venv/bin/python"
+SCRIPT_DIR="$(resolve_script_dir)"
+PY="$SCRIPT_DIR/venv/bin/python"
 
-if [[ ! -x "$VENV" ]]; then
-  echo "Fant ikke venv på $VENV. Har du kjørt 'python -m venv venv && source venv/bin/activate && pip install -r requirements.txt'?"
+if [[ ! -x "$PY" ]]; then
+  echo "Fant ikke venv på $PY"
+  echo "Tips: cd $SCRIPT_DIR && python -m venv venv && source venv/bin/activate && pip install -r requirements.txt"
   exit 1
 fi
 
-# Send alt videre til Python-CLI
-exec "$VENV" "$SCRIPT_DIR/backup.py" "$@"
+exec "$PY" "$SCRIPT_DIR/backup.py" "$@"

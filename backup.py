@@ -2,18 +2,19 @@
 # -*- coding: utf-8 -*-
 """
 Fleksibel backup-CLI for prosjekter på RPi/Unix.
-- Lager ZIP (eller tar.gz) av en valgt kildekatalog
+- SOURCE tolkes fra HOME når du gir relativ sti (f.eks. -s countdown -> ~/countdown)
+- DEST tolkes fra HOME når du gir relativ sti (default: ~/Backups)
+- Lager ZIP (eller tar.gz) av valgt kildekatalog
 - Navngir arkivet med prosjekt, versjon (valgfritt), dato og tag (valgfritt)
-- Kan laste opp til Dropbox hvis DROPBOX_TOKEN er satt
 - Støtter .backupignore + --exclude mønstre
-- Retention: behold kun N siste arkiver for prosjektet
+- Retention: behold kun N siste arkiver for prosjektet (på tvers av år/mnd)
+- Valgfri Dropbox-opplasting (DROPBOX_TOKEN)
+- --list: vis hvilke filer som inkluderes uten å skrive arkiv
 """
 
 import argparse
 import os
 import sys
-import time
-import shutil
 import fnmatch
 import logging
 from datetime import datetime
@@ -25,24 +26,23 @@ try:
 except Exception:
     load_dotenv = None
 
-# Dropbox-opplasting er valgfri; importeres kun ved behov
 def _lazy_import_dropbox():
     import uploader_dropbox  # noqa: F401
     return uploader_dropbox
 
 LOG = logging.getLogger("backup")
 
-DEFAULT_FORMAT = "zip"        # 'zip' eller 'tar.gz'
-DEFAULT_DEST = "./backups"    # standard målmappe
-IGNORE_FILE = ".backupignore" # som .gitignore, enkle glob-mønstre pr. linje
+DEFAULT_DEST = str(Path.home() / "Backups")  # <-- stor B
+IGNORE_FILE = ".backupignore"
+
+# Ekskluder kjente kataloger uansett dybde (legg til både Backups og backups)
+EXCLUDE_DIRNAMES: Set[str] = {"venv", ".venv", ".git", "node_modules", "__pycache__", "dist", "build", "backups", "Backups"}
+# Ekskluder kjente filtyper
+EXCLUDE_FILEPATTERNS: List[str] = ["*.pyc", "*.pyo", "*.log", "*.tmp"]
 
 def setup_logging(verbose: bool):
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S"
-    )
+    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
 
 def read_ignore_file(src: Path) -> List[str]:
     patterns: List[str] = []
@@ -61,39 +61,33 @@ def matched_any(path_rel: str, patterns: Iterable[str]) -> bool:
             return True
     return False
 
-def iter_files(src: Path,
-               exclude_patterns: Iterable[str],
-               include_hidden: bool) -> Iterable[Path]:
+def iter_files(src: Path, exclude_patterns: Iterable[str], include_hidden: bool) -> Iterable[Path]:
     for p in src.rglob("*"):
         if p.is_dir():
-            # skjulte mapper?
-            if not include_hidden and p.name.startswith("."):
-                # hopp over hele treet
-                # Path.rglob vil likevel gå inn, så vi håndterer på filnivå
-                pass
             continue
-        rel = p.relative_to(src).as_posix()
-
-        # hopp over skjulte filer med mindre eksplisitt tillatt
-        if not include_hidden and any(part.startswith(".") for part in p.parts):
+        rel_path = p.relative_to(src)
+        rel_posix = rel_path.as_posix()
+        if not include_hidden and any(part.startswith(".") for part in rel_path.parts):
             continue
-
-        if matched_any(rel, exclude_patterns):
+        if any(part in EXCLUDE_DIRNAMES for part in rel_path.parts):
             continue
-
+        if matched_any(rel_posix, EXCLUDE_FILEPATTERNS):
+            continue
+        if matched_any(rel_posix, exclude_patterns):
+            continue
         yield p
 
-def make_archive(src: Path,
-                 dest_dir: Path,
-                 project: str,
-                 version: Optional[str],
-                 tag: Optional[str],
-                 fmt: str,
-                 exclude_patterns: Iterable[str],
-                 include_hidden: bool,
-                 dry_run: bool) -> Path:
+def make_archive(src: Path, dest_root: Path, project: str, version: Optional[str], tag: Optional[str],
+                 fmt: str, exclude_patterns: Iterable[str], include_hidden: bool, dry_run: bool) -> Path:
+    # Målstruktur: ~/Backups/<project>/<YYYY>/<MM>/
+    now = datetime.now()
+    year = now.strftime("%Y")
+    month = now.strftime("%m")
+    project_dir = dest_root / project
+    dest_dir = project_dir / year / month
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dt = datetime.now().strftime("%Y%m%d-%H%M")
+
+    dt = now.strftime("%Y%m%d-%H%M")
     parts = [project]
     if version:
         parts.append(f"v{version}")
@@ -117,20 +111,16 @@ def make_archive(src: Path,
         import zipfile
         with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for f in iter_files(src, exclude_patterns, include_hidden):
-                arcname = f.relative_to(src).as_posix()
-                zf.write(f, arcname)
+                zf.write(f, f.relative_to(src).as_posix())
     else:
         import tarfile
-        mode = "w:gz"
-        with tarfile.open(out, mode) as tf:
+        with tarfile.open(out, "w:gz") as tf:
             for f in iter_files(src, exclude_patterns, include_hidden):
-                arcname = f.relative_to(src).as_posix()
-                tf.add(f, arcname)
+                tf.add(f, f.relative_to(src).as_posix())
 
     return out
 
 def verify_archive(archive_path: Path) -> None:
-    """Enkel verifisering: åpne og list innhold."""
     if archive_path.suffix == ".zip":
         import zipfile
         with zipfile.ZipFile(archive_path, "r") as zf:
@@ -142,15 +132,19 @@ def verify_archive(archive_path: Path) -> None:
     else:
         LOG.warning("Ukjent arkivtype for verifisering: %s", archive_path)
 
-def apply_retention(dest_dir: Path, project: str, keep: int) -> None:
+def apply_retention(project_dir: Path, project: str, keep: int) -> None:
+    """Behold kun N nyeste arkiver for prosjektet, på tvers av år/måned."""
     if keep <= 0:
         return
-    # Finn alle arkiver som starter med 'project_'
-    candidates: List[Path] = sorted(
-        [p for p in dest_dir.glob(f"{project}_*") if p.is_file()],
-        key=lambda p: p.stat().st_mtime,
-        reverse=True
-    )
+    candidates: List[Path] = []
+    for p in project_dir.rglob("*"):
+        if p.is_file():
+            name = p.name
+            if not name.startswith(f"{project}_"):
+                continue
+            if p.suffix == ".zip" or p.suffix == ".tgz" or p.suffixes[-2:] == [".tar", ".gz"]:
+                candidates.append(p)
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     to_delete = candidates[keep:]
     for p in to_delete:
         try:
@@ -159,81 +153,79 @@ def apply_retention(dest_dir: Path, project: str, keep: int) -> None:
         except Exception as e:
             LOG.warning("Klarte ikke slette %s: %s", p, e)
 
-def create_latest_symlink(dest_dir: Path, archive_path: Path, project: str) -> None:
-    link = dest_dir / f"{project}_latest"
+def create_latest_symlink(project_dir: Path, archive_path: Path, project: str) -> None:
+    """Lag absolutt symlink i prosjektroten som peker til siste arkiv."""
+    link = project_dir / f"{project}_latest"
     if link.exists() or link.is_symlink():
         try:
             link.unlink()
         except Exception:
             pass
     try:
-        link.symlink_to(archive_path.name)
+        link.symlink_to(archive_path.resolve())
     except Exception as e:
-        LOG.debug("Kunne ikke lage symlink (OK på f.eks. FAT/Dropbox): %s", e)
+        LOG.debug("Kunne ikke lage symlink (OK på f.eks. Dropbox/FAT): %s", e)
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description="Fleksibel prosjekt-backup med valgfri Dropbox-opplasting."
-    )
+    p = argparse.ArgumentParser(description="Fleksibel prosjekt-backup med valgfri Dropbox-opplasting.")
     p.add_argument("--project", "-p", help="Prosjektnavn (default: navn på kildemappe)")
-    p.add_argument("--source", "-s", required=True, help="Kildemappe som skal arkiveres")
-    p.add_argument("--dest", "-d", default=DEFAULT_DEST, help=f"Målmappe (default: {DEFAULT_DEST})")
-    p.add_argument("--version", "-v", help="Versjonsnummer, f.eks. 1.06 (valgfritt)")
+    p.add_argument("--source", "-s", required=True, help="Kildemappe (relativ = fra HOME)")
+    p.add_argument("--dest", "-d", default=os.getenv("BACKUP_DEFAULT_DEST", DEFAULT_DEST),
+                   help=f"Målmappe (relativ = fra HOME) (default: {DEFAULT_DEST})")
+    p.add_argument("--version", "-V", help="Versjonsnummer, f.eks. 1.06 (valgfritt)")  # -V
     p.add_argument("--no-version", action="store_true", help="Tving uten versjon i filnavn")
     p.add_argument("--tag", "-t", help="Ekstra tag i filnavn, f.eks. Frontend_OK")
-    p.add_argument("--format", choices=["zip", "tar.gz", "tgz"], default=DEFAULT_FORMAT,
-                   help=f"Arkivformat (default: {DEFAULT_FORMAT})")
+    p.add_argument("--format", choices=["zip", "tar.gz", "tgz"], default="zip", help="Arkivformat (default: zip)")
     p.add_argument("--include-hidden", action="store_true", help="Ta med skjulte filer/mapper")
-    p.add_argument("--exclude", action="append", default=[],
-                   help="Glob-mønster for ekskludering (kan gjentas). Eksempel: --exclude '.git/*'")
+    p.add_argument("--exclude", action="append", default=[], help="Glob-mønster for ekskludering (kan gjentas). Eksempel: --exclude '.env'")
     p.add_argument("--dropbox-path", help="Sti i Dropbox for opplasting (valgfritt)")
-    p.add_argument("--dropbox-mode", choices=["add", "overwrite"], default="add",
-                   help="Dropbox skrivemodus (default: add)")
-    p.add_argument("--keep", type=int, default=0,
-                   help="Behold kun N siste arkiver for dette prosjektet (0=av)")
+    p.add_argument("--dropbox-mode", choices=["add", "overwrite"], default="add", help="Dropbox skrivemodus (default: add)")
+    p.add_argument("--keep", type=int, default=0, help="Behold kun N siste arkiver for dette prosjektet (0=av)")
+    p.add_argument("--list", action="store_true", help="List filer som blir inkludert og avslutt (ingen skriving)")
     p.add_argument("--dry-run", action="store_true", help="Vis hva som ville skjedd, uten å skrive filer")
     p.add_argument("--no-verify", action="store_true", help="Ikke verifiser arkivet etter skriving")
-    p.add_argument("--verbose", action="store_true", help="Mer logging")
+    p.add_argument("--verbose", "-v", action="store_true", help="Mer logging")  # -v
     return p.parse_args(argv)
+
+def resolve_from_home(path_arg: str) -> Path:
+    p = Path(path_arg).expanduser()
+    if p.is_absolute():
+        return p.resolve()
+    return (Path.home() / p).resolve()
 
 def main(argv: Optional[List[str]] = None) -> int:
     if load_dotenv:
-        load_dotenv()  # last inn .env hvis finnes
+        load_dotenv()
     args = parse_args(argv)
     setup_logging(args.verbose)
 
-    src = Path(args.source).expanduser().resolve()
+    src = resolve_from_home(args.source)
     if not src.exists() or not src.is_dir():
         LOG.error("Kildemappe finnes ikke: %s", src)
         return 2
 
-    dest_dir = Path(args.dest).expanduser().resolve()
+    dest_root = resolve_from_home(args.dest)
     project = args.project or src.name
 
-    # Håndter versjon/no-version
     version = args.version
     if args.no_version:
         version = None
 
-    # Slå sammen ekskludering fra .backupignore + --exclude
     exclude_patterns: List[str] = read_ignore_file(src)
     exclude_patterns.extend(args.exclude or [])
 
-    LOG.info("Prosjekt: %s", project)
-    LOG.info("Kilde:    %s", src)
-    LOG.info("Mål:      %s", dest_dir)
-    LOG.info("Format:   %s", args.format)
-    LOG.info("Versjon:  %s", version if version else "(ingen)")
-    if args.tag:
-        LOG.info("Tag:      %s", args.tag)
-    if exclude_patterns:
-        LOG.info("Exclude:  %s", ", ".join(exclude_patterns))
-    LOG.info("Hidden:   %s", "med" if args.include_hidden else "uten")
-    LOG.info("Dry run:  %s", "ja" if args.dry_run else "nei")
+    # --list: skriv hvilke filer som blir med, og avslutt
+    if args.list:
+        count = 0
+        for f in iter_files(src, exclude_patterns, args.include_hidden):
+            print(f.relative_to(src).as_posix())
+            count += 1
+        LOG.info("Totalt %d filer ville blitt inkludert.", count)
+        return 0
 
     archive_path = make_archive(
         src=src,
-        dest_dir=dest_dir,
+        dest_root=dest_root,
         project=project,
         version=version,
         tag=args.tag,
@@ -243,17 +235,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         dry_run=args.dry_run,
     )
 
+    # Prosjektrot (for symlink og retention)
+    project_dir = dest_root / project
+
     if not args.dry_run:
         if not args.no_verify:
             LOG.info("Verifiserer arkiv...")
             verify_archive(archive_path)
-        create_latest_symlink(dest_dir, archive_path, project)
+        create_latest_symlink(project_dir, archive_path, project)
 
-    # Retention
     if args.keep and not args.dry_run:
-        apply_retention(dest_dir, project, args.keep)
+        apply_retention(project_dir, project, args.keep)
 
-    # Dropbox
     if args.dropbox_path:
         token = os.getenv("DROPBOX_TOKEN")
         if not token:
