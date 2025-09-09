@@ -31,22 +31,15 @@ def _lazy_import_dropbox():
 
 LOG = logging.getLogger("backup")
 
-# Standard dest er i HOME, ikke i repo
 DEFAULT_DEST = str(Path.home() / "backups")
 IGNORE_FILE = ".backupignore"
 
-# Katalognavn som skal ekskluderes hvor enn de dukker opp i treet
 EXCLUDE_DIRNAMES: Set[str] = {"venv", ".venv", ".git", "node_modules", "__pycache__", "dist", "build", "backups"}
-# Filmønstre som også ekskluderes
 EXCLUDE_FILEPATTERNS: List[str] = ["*.pyc", "*.pyo", "*.log", "*.tmp"]
 
 def setup_logging(verbose: bool):
     level = logging.DEBUG if verbose else logging.INFO
-    logging.basicConfig(
-        level=level,
-        format="%(asctime)s %(levelname)s %(message)s",
-        datefmt="%H:%M:%S"
-    )
+    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
 
 def read_ignore_file(src: Path) -> List[str]:
     patterns: List[str] = []
@@ -65,43 +58,24 @@ def matched_any(path_rel: str, patterns: Iterable[str]) -> bool:
             return True
     return False
 
-def iter_files(src: Path,
-               exclude_patterns: Iterable[str],
-               include_hidden: bool) -> Iterable[Path]:
+def iter_files(src: Path, exclude_patterns: Iterable[str], include_hidden: bool) -> Iterable[Path]:
     for p in src.rglob("*"):
         if p.is_dir():
             continue
-
         rel_path = p.relative_to(src)
         rel_posix = rel_path.as_posix()
-
-        # Skjul skjulte filer/mapper om ikke eksplisitt bedt om
         if not include_hidden and any(part.startswith(".") for part in rel_path.parts):
             continue
-
-        # Hopp over kjente kataloger uansett dybde
         if any(part in EXCLUDE_DIRNAMES for part in rel_path.parts):
             continue
-
-        # Hopp over kjente filmønstre
         if matched_any(rel_posix, EXCLUDE_FILEPATTERNS):
             continue
-
-        # Hopp over mønstre fra .backupignore + --exclude
         if matched_any(rel_posix, exclude_patterns):
             continue
-
         yield p
 
-def make_archive(src: Path,
-                 dest_dir: Path,
-                 project: str,
-                 version: Optional[str],
-                 tag: Optional[str],
-                 fmt: str,
-                 exclude_patterns: Iterable[str],
-                 include_hidden: bool,
-                 dry_run: bool) -> Path:
+def make_archive(src: Path, dest_dir: Path, project: str, version: Optional[str], tag: Optional[str],
+                 fmt: str, exclude_patterns: Iterable[str], include_hidden: bool, dry_run: bool) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
     dt = datetime.now().strftime("%Y%m%d-%H%M")
     parts = [project]
@@ -111,18 +85,15 @@ def make_archive(src: Path,
     if tag:
         parts.append(tag)
     base = "_".join(parts)
-
     if fmt == "zip":
         out = dest_dir / f"{base}.zip"
     elif fmt in ("tar.gz", "tgz"):
         out = dest_dir / f"{base}.tar.gz"
     else:
         raise SystemExit(f"Ukjent format: {fmt}")
-
     LOG.info("Lager arkiv: %s", out)
     if dry_run:
         return out
-
     if fmt == "zip":
         import zipfile
         with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -133,7 +104,6 @@ def make_archive(src: Path,
         with tarfile.open(out, "w:gz") as tf:
             for f in iter_files(src, exclude_patterns, include_hidden):
                 tf.add(f, f.relative_to(src).as_posix())
-
     return out
 
 def verify_archive(archive_path: Path) -> None:
@@ -177,29 +147,23 @@ def create_latest_symlink(dest_dir: Path, archive_path: Path, project: str) -> N
         LOG.debug("Kunne ikke lage symlink (OK på f.eks. FAT/Dropbox): %s", e)
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description="Fleksibel prosjekt-backup med valgfri Dropbox-opplasting."
-    )
+    p = argparse.ArgumentParser(description="Fleksibel prosjekt-backup med valgfri Dropbox-opplasting.")
     p.add_argument("--project", "-p", help="Prosjektnavn (default: navn på kildemappe)")
     p.add_argument("--source", "-s", required=True, help="Kildemappe (relativ = fra HOME)")
     p.add_argument("--dest", "-d", default=os.getenv("BACKUP_DEFAULT_DEST", DEFAULT_DEST),
                    help=f"Målmappe (relativ = fra HOME) (default: {DEFAULT_DEST})")
-    p.add_argument("--version", "-v", help="Versjonsnummer, f.eks. 1.06 (valgfritt)")
+    p.add_argument("--version", "-V", help="Versjonsnummer, f.eks. 1.06 (valgfritt)")  # <- endret til -V
     p.add_argument("--no-version", action="store_true", help="Tving uten versjon i filnavn")
     p.add_argument("--tag", "-t", help="Ekstra tag i filnavn, f.eks. Frontend_OK")
-    p.add_argument("--format", choices=["zip", "tar.gz", "tgz"], default="zip",
-                   help="Arkivformat (default: zip)")
+    p.add_argument("--format", choices=["zip", "tar.gz", "tgz"], default="zip", help="Arkivformat (default: zip)")
     p.add_argument("--include-hidden", action="store_true", help="Ta med skjulte filer/mapper")
-    p.add_argument("--exclude", action="append", default=[],
-                   help="Glob-mønster for ekskludering (kan gjentas). Eksempel: --exclude '.env'")
+    p.add_argument("--exclude", action="append", default=[], help="Glob-mønster for ekskludering (kan gjentas). Eksempel: --exclude '.env'")
     p.add_argument("--dropbox-path", help="Sti i Dropbox for opplasting (valgfritt)")
-    p.add_argument("--dropbox-mode", choices=["add", "overwrite"], default="add",
-                   help="Dropbox skrivemodus (default: add)")
-    p.add_argument("--keep", type=int, default=0,
-                   help="Behold kun N siste arkiver for dette prosjektet (0=av)")
+    p.add_argument("--dropbox-mode", choices=["add", "overwrite"], default="add", help="Dropbox skrivemodus (default: add)")
+    p.add_argument("--keep", type=int, default=0, help="Behold kun N siste arkiver for dette prosjektet (0=av)")
     p.add_argument("--dry-run", action="store_true", help="Vis hva som ville skjedd, uten å skrive filer")
     p.add_argument("--no-verify", action="store_true", help="Ikke verifiser arkivet etter skriving")
-    p.add_argument("--verbose", action="store_true", help="Mer logging")
+    p.add_argument("--verbose", "-v", action="store_true", help="Mer logging")  # <- nytt kortflagg -v
     return p.parse_args(argv)
 
 def resolve_from_home(path_arg: str) -> Path:
