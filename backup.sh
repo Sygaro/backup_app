@@ -1,11 +1,17 @@
-#!/bin/bash
-# backup.sh – kjører backup fra venv i backup_app
+#!/usr/bin/env bash
+set -euo pipefail
 
-# Aktiver virtuelt miljø
-source /home/reidar/backup_app/venv/bin/activate
+# Bruk: ./backup.sh [-p PROSJEKT] [-s KILDE] [-d DEST] [-v VERSJON] [-t TAG] [--no-version] [--dropbox-path /sti]
+# Eksempel (samme semantikk som README viser i dag):
+#   ./backup.sh -s /home/reidar/garage -p garasjeport -v 1.06 -t Frontend_OK --dropbox-path "/backup/garasjeport"
 
-# Kjør Python-backup med evt. argumenter
-python3 /home/reidar/backup_app/backup_zip.py "$@"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV="$SCRIPT_DIR/venv/bin/python"
 
-# (valgfritt) Deaktiver etterpå
-deactivate
+if [[ ! -x "$VENV" ]]; then
+  echo "Fant ikke venv på $VENV. Har du kjørt 'python -m venv venv && source venv/bin/activate && pip install -r requirements.txt'?"
+  exit 1
+fi
+
+# Send alt videre til Python-CLI
+exec "$VENV" "$SCRIPT_DIR/backup.py" "$@"
