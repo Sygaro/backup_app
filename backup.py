@@ -2,22 +2,23 @@
 # -*- coding: utf-8 -*-
 """
 Fleksibel backup-CLI for prosjekter på RPi/Unix.
+- SOURCE tolkes fra HOME når du gir relativ sti (f.eks. -s countdown -> ~/countdown)
+- DEST tolkes fra HOME når du gir relativ sti (default: ~/backups)
 - Lager ZIP (eller tar.gz) av en valgt kildekatalog
 - Navngir arkivet med prosjekt, versjon (valgfritt), dato og tag (valgfritt)
-- Kan laste opp til Dropbox hvis DROPBOX_TOKEN er satt
 - Støtter .backupignore + --exclude mønstre
 - Retention: behold kun N siste arkiver for prosjektet
+- Valgfri Dropbox-opplasting (DROPBOX_TOKEN)
 """
 
 import argparse
 import os
 import sys
-import shutil
 import fnmatch
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Set
 
 try:
     from dotenv import load_dotenv  # type: ignore
@@ -30,9 +31,14 @@ def _lazy_import_dropbox():
 
 LOG = logging.getLogger("backup")
 
-DEFAULT_FORMAT = "zip"        # 'zip' eller 'tar.gz'
-DEFAULT_DEST = "./backups"    # standard målmappe
-IGNORE_FILE = ".backupignore" # som .gitignore, enkle glob-mønstre pr. linje
+# Standard dest er i HOME, ikke i repo
+DEFAULT_DEST = str(Path.home() / "backups")
+IGNORE_FILE = ".backupignore"
+
+# Katalognavn som skal ekskluderes hvor enn de dukker opp i treet
+EXCLUDE_DIRNAMES: Set[str] = {"venv", ".venv", ".git", "node_modules", "__pycache__", "dist", "build", "backups"}
+# Filmønstre som også ekskluderes
+EXCLUDE_FILEPATTERNS: List[str] = ["*.pyc", "*.pyo", "*.log", "*.tmp"]
 
 def setup_logging(verbose: bool):
     level = logging.DEBUG if verbose else logging.INFO
@@ -65,11 +71,26 @@ def iter_files(src: Path,
     for p in src.rglob("*"):
         if p.is_dir():
             continue
-        rel = p.relative_to(src).as_posix()
-        if not include_hidden and any(part.startswith(".") for part in p.parts):
+
+        rel_path = p.relative_to(src)
+        rel_posix = rel_path.as_posix()
+
+        # Skjul skjulte filer/mapper om ikke eksplisitt bedt om
+        if not include_hidden and any(part.startswith(".") for part in rel_path.parts):
             continue
-        if matched_any(rel, exclude_patterns):
+
+        # Hopp over kjente kataloger uansett dybde
+        if any(part in EXCLUDE_DIRNAMES for part in rel_path.parts):
             continue
+
+        # Hopp over kjente filmønstre
+        if matched_any(rel_posix, EXCLUDE_FILEPATTERNS):
+            continue
+
+        # Hopp over mønstre fra .backupignore + --exclude
+        if matched_any(rel_posix, exclude_patterns):
+            continue
+
         yield p
 
 def make_archive(src: Path,
@@ -106,14 +127,12 @@ def make_archive(src: Path,
         import zipfile
         with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
             for f in iter_files(src, exclude_patterns, include_hidden):
-                arcname = f.relative_to(src).as_posix()
-                zf.write(f, arcname)
+                zf.write(f, f.relative_to(src).as_posix())
     else:
         import tarfile
         with tarfile.open(out, "w:gz") as tf:
             for f in iter_files(src, exclude_patterns, include_hidden):
-                arcname = f.relative_to(src).as_posix()
-                tf.add(f, arcname)
+                tf.add(f, f.relative_to(src).as_posix())
 
     return out
 
@@ -162,16 +181,17 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         description="Fleksibel prosjekt-backup med valgfri Dropbox-opplasting."
     )
     p.add_argument("--project", "-p", help="Prosjektnavn (default: navn på kildemappe)")
-    p.add_argument("--source", "-s", required=True, help="Kildemappe som skal arkiveres")
-    p.add_argument("--dest", "-d", default=DEFAULT_DEST, help=f"Målmappe (default: {DEFAULT_DEST})")
+    p.add_argument("--source", "-s", required=True, help="Kildemappe (relativ = fra HOME)")
+    p.add_argument("--dest", "-d", default=os.getenv("BACKUP_DEFAULT_DEST", DEFAULT_DEST),
+                   help=f"Målmappe (relativ = fra HOME) (default: {DEFAULT_DEST})")
     p.add_argument("--version", "-v", help="Versjonsnummer, f.eks. 1.06 (valgfritt)")
     p.add_argument("--no-version", action="store_true", help="Tving uten versjon i filnavn")
     p.add_argument("--tag", "-t", help="Ekstra tag i filnavn, f.eks. Frontend_OK")
-    p.add_argument("--format", choices=["zip", "tar.gz", "tgz"], default=DEFAULT_FORMAT,
-                   help=f"Arkivformat (default: {DEFAULT_FORMAT})")
+    p.add_argument("--format", choices=["zip", "tar.gz", "tgz"], default="zip",
+                   help="Arkivformat (default: zip)")
     p.add_argument("--include-hidden", action="store_true", help="Ta med skjulte filer/mapper")
     p.add_argument("--exclude", action="append", default=[],
-                   help="Glob-mønster for ekskludering (kan gjentas). Eksempel: --exclude '.git/*'")
+                   help="Glob-mønster for ekskludering (kan gjentas). Eksempel: --exclude '.env'")
     p.add_argument("--dropbox-path", help="Sti i Dropbox for opplasting (valgfritt)")
     p.add_argument("--dropbox-mode", choices=["add", "overwrite"], default="add",
                    help="Dropbox skrivemodus (default: add)")
@@ -182,18 +202,24 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--verbose", action="store_true", help="Mer logging")
     return p.parse_args(argv)
 
+def resolve_from_home(path_arg: str) -> Path:
+    p = Path(path_arg).expanduser()
+    if p.is_absolute():
+        return p.resolve()
+    return (Path.home() / p).resolve()
+
 def main(argv: Optional[List[str]] = None) -> int:
     if load_dotenv:
         load_dotenv()
     args = parse_args(argv)
     setup_logging(args.verbose)
 
-    src = Path(args.source).expanduser().resolve()
+    src = resolve_from_home(args.source)
     if not src.exists() or not src.is_dir():
         LOG.error("Kildemappe finnes ikke: %s", src)
         return 2
 
-    dest_dir = Path(args.dest).expanduser().resolve()
+    dest_dir = resolve_from_home(args.dest)
     project = args.project or src.name
 
     version = args.version
